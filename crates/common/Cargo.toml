@@ -1,0 +1,54 @@
+[package]
+name = "common"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+atlist-rs = "0.2.1"
+# async-recursion = "1.0.4"
+# async-trait = "0.1.68"
+# base64 = "0.21.0"
+crossbeam = "0.8.2"
+# chrono = { version = "0.4.24", features = ["serde"] }
+# clap = { version = "4.2.7", features = ["derive", "color"] }
+# defaults = "0.2.0"
+derivative = "2.2.0"
+derive_builder = "0.12.0"
+# derive_more = "0.99.17"
+# dirs = "5.0.1"
+generational_token_list = "0.1.5"
+eyre = "0.6.8"
+# futures = "0.3.28"
+getset = "0.1.2"
+# glob = "0.3.1"
+# indexmap = { version = "1.9.3", features = ["serde"] }
+# Inflector = "0.11.4"
+itertools = "0.10.5"
+# json5 = "0.4.1"
+lazy_static = "1"
+# maplit = "1.0.2"
+# monostate = "0.1"
+once_cell = "1.17.1"
+
+# paste = "1"
+# regex = "1.8.1"
+# serde = { version = "1.0.160", features = ["derive", "rc"] }
+# serde_json = { version = "1.0.96", features = ["preserve_order"] }
+# serde_with = "3.0.0"
+# serde_yaml = "0.9.21"
+# similar = { version = "2.2.1", features = ["unicode"] }
+# slug = "0.1.4"
+# smol_str = "0.2"
+# strum = { version = "0.24.1", features = ["derive"] }
+# tempfile = "3.5.0"
+# tokio = { version = "1.28.0", features = ["full"] }
+# toml = "0.7.3"
+# tracing = { version = "0.1.37", features = ["log"] }
+# validator = {version="0.16.0", features=["phone","card","unic","derive"]}
+thiserror = "1"
+# cn-id-card = {version = "0.1"}
+# extension-trait = "1.0.2"
+# validate_patch = {path="../validate_patch"}
+test-case = { git = "https://github.com/huang12zheng/test-case", branch = "specialization"}
+# test-case = { git = "https://github.com/frondeus/test-case"}
+# test-case = { path = "/private/tmp/test-case"}

@@ -1,0 +1,3 @@
+{
+  "rust-analyzer.linkedProjects": ["./crates/state_notifier/Cargo.toml"]
+}
