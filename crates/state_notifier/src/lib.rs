@@ -44,7 +44,7 @@ Consider checking `mounted`."#
     ConcurrentModificationError,
 }
 
-fn default_on_error(e: &Report) {}
+fn default_on_error(_e: &Report) {}
 
 #[derive(Getters, Setters)]
 pub struct StateNotifier<T> {
@@ -64,7 +64,7 @@ struct ListenerEntry<T> {
     pub listener: Listener<T>,
 }
 
-impl<'a, T: PartialEq + Clone + Sync + Send> StateNotifier<T> {
+impl<T: PartialEq + Clone + Sync + Send> StateNotifier<T> {
     pub fn new(state: T) -> Self {
         StateNotifier {
             _debug_can_add_listeners: true,
@@ -137,15 +137,13 @@ impl<'a, T: PartialEq + Clone + Sync + Send> StateNotifier<T> {
             }
             self._debug_is_mounted().unwrap();
         }
-        let listener_entry = ListenerEntry {
-            listener: listener.clone(),
-        };
+        let listener_entry = ListenerEntry { listener };
         let index = self.listeners.push_back(listener_entry);
 
         #[cfg(debug_assertions)]
         self._debug_set_can_add_listeners(false);
         if fire_immediately {
-            let _ = (listener)(&self.state).unwrap_or_else(|err| {
+            (listener)(&self.state).unwrap_or_else(|err| {
                 self.listeners.remove(index);
                 (self.on_error)(&err)
             });
