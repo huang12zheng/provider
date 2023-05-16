@@ -5,63 +5,58 @@
 //! export 'package:state_notifier/state_notifier.dart' **hide** Listener, LocatorMixin;
 #![feature(linked_list_cursors)]
 use common::{
-    eyre::{bail, Result},
+    eyre::{bail, ensure, Report, Result},
     getset::{Getters, Setters},
     itertools::join,
     thiserror::Error,
 };
 
-type Listener<T> = fn(&T) -> Result<()>;
-// type RemoveListener = fn();
-type RemoveListener<'a> = dyn FnMut() + Send + Sync + 'a;
-type ErrorListener = fn(error: IError);
-// use common::atlist_rs::LinkedList;
-use std::{
-    any::type_name,
-    // collections::LinkedList,
+use common::crossbeam::channel;
 
-    // error::Report,
-    fmt::{Debug, Display},
-    sync::{Arc, Mutex},
-    // unimplemented,
-    todo,
-};
-// use Vec as LinkedList;
+type Listener<T> = fn(&T) -> Result<()>;
+type RemoveListener<'a> = dyn FnMut() + Send + Sync + 'a;
+type ErrorListener = fn(error: &Report);
 use common::generational_token_list::GenerationalTokenList as LinkedList;
+use std::{any::type_name, fmt::Debug, sync::Arc};
 
 #[derive(Error, Debug)]
 pub enum IError {
     #[error(
-        r#"At least listener of the StateNotifier {state_notifier:?} threw an exception
-when the notifier tried to update its state.
+        r#"At least listener of the StateNotifier {runtime_type:?} threw an exception
+    when the notifier tried to update its state.
 
-The exceptions thrown are:
+    The exceptions thrown are:
 
-{errors:?}
-"#
+    {errors:?}
+    "#
     )]
     StateNotifierListenerError {
         errors: String,
-        state_notifier: String,
+        runtime_type: String,
     },
-    // #[error("tried to call [LocatorMixin.read<{0}>()], but the [{0}] was not found")]
-    // DependencyNotFoundException {
-    //     phantom: std::marker::PhantomData<T>,
-    // },
-    // #[error("Bad state: {message}")]
-    // StateError { message: String },
+    #[error(
+        r#"Tried to use $runtime_type after `dispose` was called.
+
+Consider checking `mounted`."#
+    )]
+    StateError { runtime_type: String },
+    #[error("Concurrent modification during iteration.")]
+    ConcurrentModificationError,
 }
-fn default_on_error(e: IError) {}
+
+fn default_on_error(e: &Report) {}
 
 #[derive(Getters, Setters)]
 pub struct StateNotifier<T> {
+    #[cfg(debug_assertions)]
+    _debug_can_add_listeners: bool,
+    sender: Option<channel::Sender<T>>,
+    receiver: Option<channel::Receiver<T>>,
     listeners: LinkedList<ListenerEntry<T>>,
     #[getset(set = "pub")]
     on_error: ErrorListener,
-    // #[derivative(Default(value = "true"))]
     #[getset(get = "pub")]
     mounted: bool,
-    #[getset(get = "pub")]
     state: T,
 }
 
@@ -72,38 +67,61 @@ struct ListenerEntry<T> {
 impl<'a, T: PartialEq + Clone + Sync + Send> StateNotifier<T> {
     pub fn new(state: T) -> Self {
         StateNotifier {
+            _debug_can_add_listeners: true,
+            sender: None,
+            receiver: None,
             state,
             mounted: true,
             listeners: LinkedList::new(),
             on_error: default_on_error,
         }
     }
-    pub fn set_state(&mut self, value: &T) -> Result<()> {
+    pub fn stream(&mut self) -> &channel::Receiver<T> {
+        if self.sender.is_none() {
+            let (sender, receiver) = channel::bounded::<T>(0);
+            self.sender = Some(sender);
+            self.receiver = Some(receiver);
+        }
+        self.receiver.as_ref().unwrap()
+    }
+    pub fn state(&mut self) -> &T {
+        self._debug_is_mounted().unwrap();
+        &self.state
+    }
+    pub fn set_state(&mut self, value: T) -> Result<()> {
+        self._debug_is_mounted().unwrap();
         // if (!updateShouldNotify(previousState, value))
-        if &self.state == value {
+        if self.state.eq(&value) {
             // if std::ptr::eq(&self.state, value) {
             return Ok(());
         }
+
         // _controller?.add(value);
+        if let Some(ref sender) = self.sender {
+            let _ = sender.send(value.clone());
+        };
 
         let mut errors = vec![];
         self.listeners.iter().for_each(|e| {
-            (e.listener)(value).unwrap_or_else(|err| errors.push(err));
+            (e.listener)(&value).unwrap_or_else(|err| {
+                (self.on_error)(&err);
+                errors.push(err);
+            });
         });
 
         self.state = value.clone();
         if errors.is_empty() {
-            Ok(())
-        } else {
             let e = IError::StateNotifierListenerError {
                 errors: join(errors, "\n"),
-                state_notifier: type_name::<T>().to_owned(),
+                runtime_type: value.type_name(),
             };
-            bail!(e)
+            bail!(e); // no need return
         }
+        Ok(())
     }
 
     pub fn has_listeners(&self) -> bool {
+        self._debug_is_mounted().unwrap();
         !self.listeners.is_empty()
     }
 
@@ -111,16 +129,29 @@ impl<'a, T: PartialEq + Clone + Sync + Send> StateNotifier<T> {
         &mut self,
         listener: Listener<T>,
         fire_immediately: bool,
-    ) -> Result<Arc<RemoveListener>> // ->
-    {
+    ) -> Result<Arc<RemoveListener>> {
+        #[cfg(debug_assertions)]
+        {
+            if !self._debug_can_add_listeners {
+                bail!(IError::ConcurrentModificationError)
+            }
+            self._debug_is_mounted().unwrap();
+        }
         let listener_entry = ListenerEntry {
             listener: listener.clone(),
         };
         let index = self.listeners.push_back(listener_entry);
 
+        #[cfg(debug_assertions)]
+        self._debug_set_can_add_listeners(false);
         if fire_immediately {
-            let _ = (listener)(&self.state);
+            let _ = (listener)(&self.state).unwrap_or_else(|err| {
+                self.listeners.remove(index);
+                (self.on_error)(&err)
+            });
         }
+        #[cfg(debug_assertions)]
+        self._debug_set_can_add_listeners(true);
 
         let callback = move || {
             self.listeners.remove(index);
@@ -128,121 +159,39 @@ impl<'a, T: PartialEq + Clone + Sync + Send> StateNotifier<T> {
         Ok(Arc::new(callback))
     }
 
-    // pub fn set_on_error(&mut self, error_listener: ErrorListener) {
-    //     self.on_error = Some(error_listener);
-    // }
-
-    // #[cfg(test)]
-    // pub fn debug_state(&self) -> T {
-    //     self.state
-    // }
-    // fn updateShouldNotify
+    pub fn dispose(&mut self) {
+        self._debug_is_mounted().unwrap();
+        self.listeners.clear();
+        if let Some(sender) = self.sender.take() {
+            drop(sender);
+        }
+        self.mounted = false;
+    }
 }
-// const LOCATOR: Locator<T> = || unimplemented!();
-// <T>() => throw DependencyNotFoundException<T>();
-// remove it
-// pub trait LocatorMixin {
-//     fn locator<T>(&self) -> Result<T> {
-//         // todo!()
-//         panic!("{:?}"，Error::DependencyNotFoundException::<T>())
-//     }
+impl<T> TypeName for T {}
+pub trait TypeName {
+    fn type_name(&self) -> String {
+        type_name::<Self>().to_owned()
+    }
+}
 
-// fn read<T>(&self) -> Result<Locator<T>, Error<T>> {}
-
-// fn set_read<T>(&mut self, read: Box<dyn Fn() -> Result<T, DependencyNotFoundException<T>>>);
-
-// fn debug_mock_dependency<T, Dependency>(&mut self, value: Dependency)
-// where
-//     T: 'static,
-//     Dependency: 'static;
-
-// fn init_state(&mut self);
-
-// fn update(&mut self, watch: Box<dyn Fn() -> Result<(), DependencyNotFoundException<()>>>>;
-
-// fn debug_update(&mut self);
-// }
-// #[derive(Debug, Error)]
-// #[error("At least listener of the StateNotifier {0} threw an exception when the notifier tried to update its state.\n\nThe exceptions thrown are:\n\n{0:?}")]
-// struct StateNotifierListenerError {
-//     errors: Vec<Box<dyn std::error::Error>>,
-//     stack_traces: Vec<Option<std::backtrace::Backtrace>>,
-//     state_notifier: StateNotifier,
-// }
-
-// fn p() {
-//     let a: Listener<u32> = |a| {};
-// }
-// type Locator = dyn Fn() -> T;
-
-// struct StateNotifier<T> {
-//     state: T,
-//     listeners: Vec<Listener<T>>,
-//     error_listener: Option<ErrorListener>,
-// }
-
-// impl<T> StateNotifier<T> {
-//     fn new(initial_state: T) -> StateNotifier<T> {
-//         StateNotifier {
-//             state: initial_state,
-//             listeners: Vec::new(),
-//             error_listener: None,
-//         }
-//     }
-
-//     fn add_listener(&mut self, listener: Listener<T>) -> RemoveListener {
-//         self.listeners.push(listener);
-//         let index = self.listeners.len() - 1;
-//         let remove_listener: RemoveListener = || {
-//             self.listeners.remove(index);
-//         };
-// struct StateNotifier<T> {
-//     state: T,
-//     listeners: Vec<Listener<T>>,
-//     error_listener: Option<ErrorListener>,
-// }
-
-// impl<T> StateNotifier<T> {
-//     fn new(initial_state: T) -> StateNotifier<T> {
-//         StateNotifier {
-//             state: initial_state,
-//             listeners: Vec::new(),
-//             error_listener: None,
-//         }
-//     }
-
-//     fn add_listener(&mut self, listener: Listener<T>) -> RemoveListener {
-//         self.listeners.push(listener);
-//         let index = self.listeners.len() - 1;
-//         let remove_listener: RemoveListener = || {
-//             self.listeners.remove(index);
-//         };
-//         remove_listener
-//     }
-
-//     fn set_state(&mut self, new_state: T) {
-//         self.state = new_state;
-//         for listener in &self.listeners {
-//             listener(self.state.clone());
-//         }
-//     }
-
-//     fn on_error(&mut self, error_listener: ErrorListener) {
-//         self.error_listener = Some(error_listener);
-//     }
-
-//     fn notify_error(
-//         &self,
-//         error: &dyn std::error::Error,
-//         stack_trace: Option<&std::backtrace::Backtrace>,
-//     ) {
-//         if let Some(error_listener) = &self.error_listener {
-//             error_listener(error, stack_trace);
-//         }
-//     }
-
-//     fn with_state<R>(&self, locator: Locator, callback: fn(&T) -> R) -> R {
-//         let state = (locator)();
-//         callback(&state)
-//     }
-// }
+impl<T> StateNotifier<T> {
+    #[cfg(debug_assertions)]
+    fn _debug_set_can_add_listeners(&mut self, value: bool) -> bool {
+        self._debug_can_add_listeners = value;
+        true
+    }
+    fn _debug_is_mounted(&self) -> Result<bool> {
+        ensure!(
+            !self.mounted,
+            IError::StateError {
+                runtime_type: self.type_name()
+            }
+        );
+        Ok(true)
+    }
+    #[cfg(debug_assertions)]
+    pub fn debug_state(&self) -> &T {
+        &self.state
+    }
+}
